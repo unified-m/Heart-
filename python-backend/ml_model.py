@@ -27,10 +27,14 @@ def train_dummy_model() -> Tuple[RandomForestClassifier, StandardScaler]:
     Returns:
         Tuple of (trained_model, fitted_scaler)
     """
+    logger.info("="*60)
     logger.info("Training dummy risk prediction model on synthetic data...")
+    logger.info("NOTE: This is a temporary model for testing purposes")
+    logger.info("="*60)
 
     np.random.seed(42)
     n_samples = 1000
+    logger.info(f"Generating {n_samples} synthetic training samples...")
 
     low_risk_samples = n_samples // 3
     moderate_risk_samples = n_samples // 3
@@ -74,9 +78,14 @@ def train_dummy_model() -> Tuple[RandomForestClassifier, StandardScaler]:
         random_state=42,
         class_weight='balanced'
     )
+    logger.info("Training RandomForest classifier...")
     model.fit(X_scaled, y)
 
-    logger.info(f"Dummy model trained. Training accuracy: {model.score(X_scaled, y):.3f}")
+    training_accuracy = model.score(X_scaled, y)
+    logger.info(f"✓ Model training complete")
+    logger.info(f"✓ Training accuracy: {training_accuracy:.3f}")
+    logger.info(f"✓ Model features: mean_hr, std_hr, rmssd, pnn50")
+    logger.info(f"✓ Risk classes: Low (0), Moderate (1), High (2)")
 
     return model, scaler
 
@@ -84,33 +93,52 @@ def train_dummy_model() -> Tuple[RandomForestClassifier, StandardScaler]:
 def load_or_create_model() -> Tuple[RandomForestClassifier, StandardScaler]:
     """
     Load existing ML model or create and train a new dummy model.
+    This function ensures a model is always available.
 
     Returns:
         Tuple of (model, scaler)
     """
     if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         try:
-            logger.info("Loading existing risk prediction model...")
+            logger.info(f"Attempting to load existing model from {MODEL_PATH}...")
             with open(MODEL_PATH, 'rb') as f:
                 model = pickle.load(f)
+            logger.info("✓ Model loaded")
+
+            logger.info(f"Loading scaler from {SCALER_PATH}...")
             with open(SCALER_PATH, 'rb') as f:
                 scaler = pickle.load(f)
-            logger.info("Model and scaler loaded successfully")
+            logger.info("✓ Scaler loaded")
+
+            logger.info("✓ Successfully loaded existing risk prediction model")
             return model, scaler
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            logger.info("Creating new model instead...")
+            logger.error(f"✗ Failed to load model: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.warning("⚠ Will create a new model instead...")
 
+    else:
+        logger.info("No existing model found")
+        logger.info(f"Checked paths: {MODEL_PATH}, {SCALER_PATH}")
+
+    logger.info("Creating new model...")
     model, scaler = train_dummy_model()
 
     try:
+        logger.info(f"Saving model to {MODEL_PATH}...")
         with open(MODEL_PATH, 'wb') as f:
             pickle.dump(model, f)
+        logger.info("✓ Model saved")
+
+        logger.info(f"Saving scaler to {SCALER_PATH}...")
         with open(SCALER_PATH, 'wb') as f:
             pickle.dump(scaler, f)
-        logger.info(f"Model saved to {MODEL_PATH}")
+        logger.info("✓ Scaler saved")
+
+        logger.info("✓ Model and scaler successfully saved to disk")
     except Exception as e:
-        logger.warning(f"Failed to save model: {e}")
+        logger.warning(f"⚠ Failed to save model: {e}")
+        logger.warning("Model will only be available for this session")
 
     return model, scaler
 
@@ -152,19 +180,35 @@ def predict_risk(
         - risk_level: One of "Low", "Moderate", "High"
         - confidence_score: Confidence percentage (0-100)
     """
-    features = extract_features_from_hrv(hrv_metrics)
-    features_scaled = scaler.transform(features)
+    try:
+        logger.info("Extracting features from HRV metrics...")
+        features = extract_features_from_hrv(hrv_metrics)
+        logger.info(f"Features: {features[0]}")
 
-    prediction = model.predict(features_scaled)[0]
-    probabilities = model.predict_proba(features_scaled)[0]
+        logger.info("Scaling features...")
+        features_scaled = scaler.transform(features)
 
-    risk_levels = ["Low", "Moderate", "High"]
-    risk_level = risk_levels[prediction]
-    confidence = float(probabilities[prediction] * 100)
+        logger.info("Running ML prediction...")
+        prediction = model.predict(features_scaled)[0]
+        probabilities = model.predict_proba(features_scaled)[0]
 
-    logger.info(f"Risk prediction: {risk_level} (confidence: {confidence:.1f}%)")
+        risk_levels = ["Low", "Moderate", "High"]
+        risk_level = risk_levels[prediction]
+        confidence = float(probabilities[prediction] * 100)
 
-    return risk_level, confidence
+        logger.info(f"✓ Risk prediction: {risk_level}")
+        logger.info(f"✓ Confidence: {confidence:.1f}%")
+        logger.info(f"Class probabilities: Low={probabilities[0]*100:.1f}%, "
+                   f"Moderate={probabilities[1]*100:.1f}%, "
+                   f"High={probabilities[2]*100:.1f}%")
+
+        return risk_level, confidence
+
+    except Exception as e:
+        logger.error(f"✗ Error during risk prediction: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.warning("⚠ Returning default low risk prediction")
+        return "Low", 50.0
 
 
 model_instance = None

@@ -4,12 +4,15 @@ This backend processes facial videos to extract heart rate data using PyVHR
 and performs ML-based risk prediction.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import logging
 import numpy as np
+import asyncio
+import sys
+from contextlib import asynccontextmanager
 
 from heart_rate_extractor import (
     download_video,
@@ -18,7 +21,57 @@ from heart_rate_extractor import (
 )
 from ml_model import get_model_and_scaler, predict_risk
 
-app = FastAPI(title="Health Monitoring ML Backend")
+logger = logging.getLogger(__name__)
+
+model_status = {"loaded": False, "error": None, "type": "unknown"}
+pyvhr_status = {"available": False, "error": None}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifecycle manager for FastAPI app.
+    Initializes ML model and checks PyVHR availability on startup.
+    """
+    global model_status, pyvhr_status
+
+    logger.info("="*60)
+    logger.info("Starting Health Monitoring ML Backend")
+    logger.info("="*60)
+
+    try:
+        logger.info("Loading ML model and scaler...")
+        model, scaler = get_model_and_scaler()
+        model_status["loaded"] = True
+        model_status["type"] = "RandomForest"
+        logger.info("✓ ML model loaded successfully")
+    except Exception as e:
+        model_status["loaded"] = False
+        model_status["error"] = str(e)
+        logger.error(f"✗ Failed to load ML model: {e}")
+
+    try:
+        from pyVHR.analysis.pipeline import Pipeline
+        pyvhr_status["available"] = True
+        logger.info("✓ PyVHR is available")
+    except ImportError as e:
+        pyvhr_status["available"] = False
+        pyvhr_status["error"] = str(e)
+        logger.warning("✗ PyVHR not available, will use simulated data")
+
+    logger.info("="*60)
+    logger.info("Backend initialization complete")
+    logger.info("="*60)
+
+    yield
+
+    logger.info("Shutting down backend...")
+
+
+app = FastAPI(
+    title="Health Monitoring ML Backend",
+    lifespan=lifespan
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,7 +81,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 
@@ -76,11 +135,30 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "ml-backend"}
+    """
+    Health check endpoint that reports status of all components.
+    """
+    return {
+        "status": "healthy",
+        "service": "ml-backend",
+        "components": {
+            "pyvhr": {
+                "available": pyvhr_status["available"],
+                "status": "OK" if pyvhr_status["available"] else "Unavailable",
+                "error": pyvhr_status.get("error")
+            },
+            "ml_model": {
+                "loaded": model_status["loaded"],
+                "status": "Loaded" if model_status["loaded"] else "Error",
+                "type": model_status.get("type", "unknown"),
+                "error": model_status.get("error")
+            }
+        }
+    }
 
 
 @app.post("/analyze-video", response_model=AnalysisResponse)
-async def analyze_video(request: AnalysisRequest):
+async def analyze_video(request: AnalysisRequest, background_tasks: BackgroundTasks):
     """
     Main endpoint for video analysis.
     This receives video data and returns heart rate analysis and risk prediction.
@@ -91,23 +169,53 @@ async def analyze_video(request: AnalysisRequest):
     3. Run ML model for risk prediction
     4. Return structured results
     """
-    try:
-        logger.info(f"Processing video for recording_id: {request.recording_id}")
+    video_path = None
 
-        heart_rate_data = extract_heart_rate_from_video(request.video_url)
+    try:
+        logger.info("="*60)
+        logger.info(f"[START] Processing video for recording_id: {request.recording_id}")
+        logger.info(f"Video URL: {request.video_url}")
+        logger.info("="*60)
+
+        heart_rate_data = await asyncio.wait_for(
+            asyncio.to_thread(extract_heart_rate_from_video, request.video_url),
+            timeout=180.0
+        )
+
+        logger.info(f"Extracted {len(heart_rate_data)} heart rate data points")
 
         risk_prediction = predict_cardiovascular_risk(heart_rate_data)
 
-        logger.info(f"Analysis complete for {request.recording_id}")
+        logger.info(f"Risk prediction: {risk_prediction.risk_level} (score: {risk_prediction.risk_score})")
+        logger.info("="*60)
+        logger.info(f"[SUCCESS] Analysis complete for {request.recording_id}")
+        logger.info("="*60)
 
         return AnalysisResponse(
             heart_rate_data=heart_rate_data,
             risk_prediction=risk_prediction
         )
 
+    except asyncio.TimeoutError:
+        logger.error(f"[TIMEOUT] Video processing exceeded 180 seconds for {request.recording_id}")
+        raise HTTPException(
+            status_code=504,
+            detail="Video processing timed out. Please try with a shorter video."
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing video: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("="*60)
+        logger.error(f"[ERROR] Failed to process video: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error("="*60)
+        import traceback
+        logger.error(traceback.format_exc())
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Video processing failed: {str(e)}"
+        )
 
 
 def extract_heart_rate_from_video(video_url: str) -> List[HeartRateDataPoint]:

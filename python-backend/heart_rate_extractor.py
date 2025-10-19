@@ -56,12 +56,22 @@ def extract_heart_rate_with_pyvhr(video_path: str) -> Tuple[np.ndarray, float, d
         - hrv_metrics: Dictionary containing HRV statistics
     """
     try:
+        logger.info("Checking PyVHR availability...")
         from pyVHR.analysis.pipeline import Pipeline
+        logger.info("✓ PyVHR imported successfully")
+
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        file_size = os.path.getsize(video_path)
+        logger.info(f"Processing video file: {video_path} ({file_size} bytes)")
 
         logger.info("Initializing PyVHR pipeline...")
         pipe = Pipeline()
+        logger.info("✓ PyVHR pipeline initialized")
 
-        logger.info(f"Processing video with PyVHR: {video_path}")
+        logger.info("Starting PyVHR video processing...")
+        logger.info("Configuration: roi_approach='patches', method='POS', bpm_type='welch'")
 
         results = pipe.run_on_video(
             videoFileName=video_path,
@@ -74,26 +84,55 @@ def extract_heart_rate_with_pyvhr(video_path: str) -> Tuple[np.ndarray, float, d
             verb=False
         )
 
+        logger.info("✓ PyVHR processing complete")
+
         bvps, timesigs, bpms = results
+        logger.info(f"Raw results: bvps shape={np.array(bvps).shape if bvps is not None else None}, "
+                   f"timesigs shape={np.array(timesigs).shape if timesigs is not None else None}, "
+                   f"bpms shape={np.array(bpms).shape if bpms is not None else None}")
 
         if bpms is None or len(bpms) == 0:
-            raise ValueError("PyVHR failed to extract heart rate from video")
+            logger.error("✗ PyVHR returned empty BPM array")
+            raise ValueError("PyVHR failed to extract heart rate from video - no BPM data returned")
 
-        average_bpm = float(np.mean(bpms))
+        bpms_array = np.array(bpms).flatten()
+        valid_bpms = bpms_array[(bpms_array >= 40) & (bpms_array <= 200)]
 
-        logger.info(f"Heart rate extraction successful. Average BPM: {average_bpm:.2f}")
+        if len(valid_bpms) == 0:
+            logger.error("✗ No valid BPM values in physiological range (40-200)")
+            raise ValueError("No valid heart rate data extracted")
 
-        hrv_metrics = compute_hrv_metrics(bpms)
+        logger.info(f"Extracted {len(valid_bpms)} valid BPM measurements")
 
-        return bpms, average_bpm, hrv_metrics
+        average_bpm = float(np.mean(valid_bpms))
+        logger.info(f"✓ Average BPM: {average_bpm:.2f}")
+
+        hrv_metrics = compute_hrv_metrics(valid_bpms)
+        logger.info(f"✓ HRV metrics computed: mean_hr={hrv_metrics['mean_hr']:.2f}, "
+                   f"std_hr={hrv_metrics['std_hr']:.2f}, "
+                   f"rmssd={hrv_metrics['rmssd']:.2f}, "
+                   f"pnn50={hrv_metrics['pnn50']:.2f}")
+
+        return valid_bpms, average_bpm, hrv_metrics
 
     except ImportError as e:
-        logger.error(f"PyVHR not available: {e}")
-        logger.warning("Falling back to simulated heart rate data")
+        logger.error(f"✗ PyVHR not available: {e}")
+        logger.warning("⚠ Falling back to simulated heart rate data")
+        return generate_simulated_heart_rate()
+    except FileNotFoundError as e:
+        logger.error(f"✗ {e}")
+        logger.warning("⚠ Falling back to simulated heart rate data")
+        return generate_simulated_heart_rate()
+    except ValueError as e:
+        logger.error(f"✗ Validation error: {e}")
+        logger.warning("⚠ Falling back to simulated heart rate data")
         return generate_simulated_heart_rate()
     except Exception as e:
-        logger.error(f"Error during PyVHR processing: {e}")
-        logger.warning("Falling back to simulated heart rate data")
+        logger.error(f"✗ Unexpected error during PyVHR processing: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(traceback.format_exc())
+        logger.warning("⚠ Falling back to simulated heart rate data")
         return generate_simulated_heart_rate()
 
 
@@ -145,23 +184,32 @@ def generate_simulated_heart_rate() -> Tuple[np.ndarray, float, dict]:
     Returns:
         Tuple of (heart_rate_series, average_bpm, hrv_metrics)
     """
-    logger.warning("Generating simulated heart rate data")
+    logger.warning("="*40)
+    logger.warning("⚠ GENERATING SIMULATED HEART RATE DATA")
+    logger.warning("This is fallback data for testing purposes")
+    logger.warning("="*40)
 
     duration_seconds = 60
     samples_per_second = 4
     total_samples = duration_seconds * samples_per_second
 
-    base_heart_rate = 70 + np.random.random() * 20
+    base_heart_rate = 65 + np.random.random() * 15
     heart_rate_series = []
+
+    logger.info(f"Generating {total_samples} simulated heart rate samples...")
 
     for i in range(total_samples):
         variation = np.sin(i / 10) * 5 + (np.random.random() - 0.5) * 3
-        heart_rate = max(50, min(120, base_heart_rate + variation))
+        trend = (i / total_samples) * 5
+        heart_rate = max(50, min(120, base_heart_rate + variation + trend))
         heart_rate_series.append(heart_rate)
 
     heart_rate_series = np.array(heart_rate_series)
     average_bpm = float(np.mean(heart_rate_series))
     hrv_metrics = compute_hrv_metrics(heart_rate_series)
+
+    logger.info(f"✓ Simulated data generated: {len(heart_rate_series)} samples")
+    logger.info(f"✓ Simulated average BPM: {average_bpm:.2f}")
 
     return heart_rate_series, average_bpm, hrv_metrics
 
